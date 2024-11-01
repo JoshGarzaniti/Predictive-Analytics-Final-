@@ -1,0 +1,340 @@
+---
+title: "Final Project Predictive Analytics"
+author: "Josh Garzaniti"
+date: "2024-09-26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+NEW CODE:
+```{r}
+
+
+
+library(nflverse)
+library(nflreadr)
+
+contracts = load_contracts()
+  
+contracts = contracts %>%
+  filter(draft_round <= 7) %>% 
+  filter(draft_year >= 1990)
+
+
+# we can switch the years after draft that we want
+sign_year_after_draft = 5  # Set the number of years after draft for re-signing
+
+# Filter and transform the contracts data
+resign = contracts %>%
+  filter(year_signed > draft_year) %>%
+  group_by(player) %>% 
+  slice_min(year_signed) %>% 
+  mutate(
+    years_after_draft = year_signed - draft_year,  # Calculate how many years after the draft the player signed
+    resigned_with_draft_team = ifelse(team == draft_team & years_after_draft <= sign_year_after_draft, 1, 0)  # Check if re-signed with draft team within the specified number of years
+  ) %>%
+  distinct(player, .keep_all = TRUE)  
+
+
+
+clean_resign = resign %>%
+  select(player, position, team, draft_team, year_signed, gsis_id, 
+         draft_year, draft_round, draft_overall, draft_year, years_after_draft, 
+         resigned_with_draft_team) %>% 
+  # renaming the id column so we can hopefully merge them back after 
+  dplyr::rename(player_id = gsis_id)
+
+# pulling the offensive and defensive stats, we can switch the season range too
+offense_stats = load_player_stats(seasons = 2000:2024, stat_type = "offense")
+
+offense_stats = offense_stats %>% mutate(position = ifelse( player_display_name == "Trent Richardson", "RB", position ))
+offense_stats = offense_stats %>% mutate(position = ifelse( player_display_name == "Mark Walton", "RB", position ))
+offense_stats = offense_stats %>% mutate(position = ifelse( player_display_name == "James Casey", "TE", position ))
+
+
+total_stat_by_year = offense_stats %>%
+  group_by(player_id) %>%
+  dplyr::rename(season_stats = season) %>% 
+  summarize(
+    position = first(position),
+    
+    # sum of the passing stats that are in the list
+    completions = sum(completions, na.rm = TRUE),
+    attempts = sum(attempts, na.rm = TRUE),
+    passing_yards = sum(passing_yards, na.rm = TRUE),
+    passing_tds = sum(passing_tds, na.rm = TRUE),
+    interceptions = sum(interceptions, na.rm = TRUE),
+    sacks = sum(sacks, na.rm = TRUE),
+    sack_yards = sum(sack_yards, na.rm = TRUE),
+    sack_fumbles = sum(sack_fumbles, na.rm = TRUE),
+    sack_fumbles_lost = sum(sack_fumbles_lost, na.rm = TRUE),
+    passing_air_yards = sum(passing_air_yards, na.rm = TRUE),
+    passing_yards_after_catch = sum(passing_yards_after_catch, na.rm = TRUE),
+    passing_first_downs = sum(passing_first_downs, na.rm = TRUE),
+    passing_epa = sum(passing_epa, na.rm = TRUE),
+    passing_2pt_conversions = sum(passing_2pt_conversions, na.rm = TRUE),
+    
+    # sum of the rushing stats that are in the list
+    carries = sum(carries, na.rm = TRUE),
+    rushing_yards = sum(rushing_yards, na.rm = TRUE),
+    rushing_tds = sum(rushing_tds, na.rm = TRUE),
+    rushing_fumbles = sum(rushing_fumbles, na.rm = TRUE),
+    rushing_fumbles_lost = sum(rushing_fumbles_lost, na.rm = TRUE),
+    rushing_first_downs = sum(rushing_first_downs, na.rm = TRUE),
+    rushing_epa = sum(rushing_epa, na.rm = TRUE),
+    rushing_2pt_conversions = sum(rushing_2pt_conversions, na.rm = TRUE),
+    
+    # sum of the recieving stats that are in the list
+    receptions = sum(receptions, na.rm = TRUE),
+    targets = sum(targets, na.rm = TRUE),
+    receiving_yards = sum(receiving_yards, na.rm = TRUE),
+    receiving_tds = sum(receiving_tds, na.rm = TRUE),
+    receiving_fumbles = sum(receiving_fumbles, na.rm = TRUE),
+    receiving_fumbles_lost = sum(receiving_fumbles_lost, na.rm = TRUE),
+    receiving_air_yards = sum(receiving_air_yards, na.rm = TRUE),
+    receiving_yards_after_catch = sum(receiving_yards_after_catch, na.rm = TRUE),
+    receiving_first_downs = sum(receiving_first_downs, na.rm = TRUE),
+    receiving_epa = sum(receiving_epa, na.rm = TRUE),
+    receiving_2pt_conversions = sum(receiving_2pt_conversions, na.rm = TRUE),
+  )
+
+
+sum_stats = total_stat_by_year %>% 
+  group_by(position, player_id) %>% 
+  filter(position %in% c("QB", "RB", "TE", "WR"))
+
+
+
+contract_and_stats = clean_resign %>%
+  full_join(sum_stats, by = "player_id") 
+
+
+contract_and_stats = contract_and_stats %>% 
+  filter(draft_year >= 1990, na.rm = TRUE, 
+         draft_year <= 2020, na.rm = TRUE) %>% 
+  filter(position.x %in% c("QB", "RB", "TE", "WR")) %>% 
+  filter(!is.na(player_id)) %>% 
+  select(-position.y)
+
+contract_and_stats = contract_and_stats[complete.cases(contract_and_stats$completions),]
+
+#changing NA draft teams
+contract_and_stats$draft_team[is.na(contract_and_stats$draft_team)] = "49ers"
+
+contract_and_stats = contract_and_stats %>% mutate(resigned_with_draft_team = ifelse(team == draft_team & years_after_draft <= sign_year_after_draft, 1, 0))
+```
+
+
+##Change data types to fit RF model we can’t use player, player id, (draft year and year resigned maybe could work as factors)
+```{r}
+
+contract_and_stats$position.x = as.factor(contract_and_stats$position.x)
+contract_and_stats$team = as.factor(contract_and_stats$team)
+contract_and_stats$draft_team = as.factor(contract_and_stats$draft_team)
+contract_and_stats$draft_round = as.factor(contract_and_stats$draft_round)
+contract_and_stats$draft_overall = as.numeric(contract_and_stats$draft_overall)
+contract_and_stats$years_after_draft = as.numeric(contract_and_stats$years_after_draft)
+contract_and_stats$resigned_with_draft_team = as.factor(contract_and_stats$resigned_with_draft_team)
+contract_and_stats$completions = as.numeric(contract_and_stats$completions)
+contract_and_stats$attempts = as.numeric(contract_and_stats$attempts)
+contract_and_stats$passing_yards = as.numeric(contract_and_stats$passing_yards)
+contract_and_stats$passing_tds = as.numeric(contract_and_stats$passing_tds)
+contract_and_stats$interceptions = as.numeric(contract_and_stats$interceptions)
+contract_and_stats$sacks = as.numeric(contract_and_stats$sacks)
+contract_and_stats$sack_yards = as.numeric(contract_and_stats$sack_yards)
+contract_and_stats$sack_fumbles = as.numeric(contract_and_stats$sack_fumbles)
+contract_and_stats$sack_fumbles_lost = as.numeric(contract_and_stats$sack_fumbles_lost)
+contract_and_stats$rushing_first_downs = as.numeric(contract_and_stats$rushing_first_downs)
+contract_and_stats$passing_air_yards = as.numeric(contract_and_stats$passing_air_yards)
+contract_and_stats$passing_yards_after_catch = as.numeric(contract_and_stats$passing_yards_after_catch)
+contract_and_stats$passing_first_downs = as.numeric(contract_and_stats$passing_first_downs)
+contract_and_stats$passing_epa = as.numeric(contract_and_stats$passing_epa)
+contract_and_stats$passing_2pt_conversions = as.numeric(contract_and_stats$passing_2pt_conversions)
+contract_and_stats$carries = as.numeric(contract_and_stats$carries)
+contract_and_stats$rushing_yards = as.numeric(contract_and_stats$rushing_yards)
+contract_and_stats$rushing_tds = as.numeric(contract_and_stats$rushing_tds)
+contract_and_stats$rushing_fumbles = as.numeric(contract_and_stats$rushing_fumbles)
+contract_and_stats$rushing_fumbles_lost = as.numeric(contract_and_stats$rushing_fumbles_lost)
+contract_and_stats$rushing_epa = as.numeric(contract_and_stats$rushing_epa)
+contract_and_stats$rushing_2pt_conversions = as.numeric(contract_and_stats$rushing_epa)
+contract_and_stats$receptions = as.numeric(contract_and_stats$receptions)
+contract_and_stats$targets = as.numeric(contract_and_stats$targets)
+contract_and_stats$receiving_yards = as.numeric(contract_and_stats$receiving_yards)
+contract_and_stats$receiving_tds = as.numeric(contract_and_stats$receiving_tds)
+contract_and_stats$receiving_fumbles = as.numeric(contract_and_stats$receiving_fumbles)
+contract_and_stats$receiving_fumbles_lost = as.numeric(contract_and_stats$receiving_fumbles_lost)
+contract_and_stats$receiving_air_yards = as.numeric(contract_and_stats$receiving_air_yards)
+contract_and_stats$receiving_yards_after_catch = as.numeric(contract_and_stats$receiving_yards_after_catch)
+contract_and_stats$receiving_first_downs = as.numeric(contract_and_stats$receiving_first_downs)
+contract_and_stats$receiving_epa = as.numeric(contract_and_stats$receiving_epa)
+contract_and_stats$receiving_2pt_conversions = as.numeric(contract_and_stats$receiving_2pt_conversions)
+
+
+
+```
+
+
+
+##Data Partitioning and Random Forest Model (We need to format vars first to either be factors or numericals) (we can also tune this later)
+```{r}
+contract_and_stats_ungrouped = contract_and_stats %>%
+  ungroup() %>%    
+  dplyr::select(-player, -player_id, -team)  
+
+summary(contract_and_stats_ungrouped)
+
+str(contract_and_stats_ungrouped)
+
+sum(is.na(contract_and_stats$resigned_with_draft_team) | contract_and_stats$resigned_with_draft_team == "")
+
+train_indices = createDataPartition(contract_and_stats_ungrouped$resigned_with_draft_team, p = 0.60, list = FALSE)
+
+train_data = contract_and_stats_ungrouped[train_indices, ]
+
+valid_data = contract_and_stats_ungrouped[-train_indices, ]
+
+train_data
+#Check to see if training data has NA values
+sum(is.na(train_data))
+
+colSums(is.na(train_data))
+
+head(valid_data,20)
+
+colSums(is.na(train_data))
+
+train_data_clean = na.omit(train_data)
+
+train_data_clean = train_data_clean%>%
+  select(position.x, draft_team, year_signed, draft_year, draft_round, draft_overall, years_after_draft, completions, attempts, passing_yards, passing_tds, interceptions, sacks, sack_yards, sack_fumbles, sack_fumbles_lost, passing_air_yards, passing_yards_after_catch, passing_first_downs, passing_epa, passing_2pt_conversions, carries, rushing_yards, rushing_tds, rushing_fumbles, rushing_fumbles_lost, rushing_first_downs, rushing_epa, rushing_2pt_conversions, receptions, targets, receiving_yards, receiving_tds, receiving_fumbles, receiving_fumbles_lost, receiving_air_yards, receiving_yards_after_catch, receiving_first_downs, receiving_epa, receiving_2pt_conversions, resigned_with_draft_team)
+
+rf_draft_mod = randomForest(resigned_with_draft_team ~.,
+                     	data = train_data_clean,
+                     	ntree = 500,
+                     	nodesize = 1,
+                     	mtry = 40) 
+
+rf_pred = predict(rf_draft_mod, valid_data, type = "prob")
+
+
+rf_pred_class = rep("0", nrow(rf_pred))
+
+rf_pred_class[rf_pred[,2] >= 0.5] = "1"
+
+resign_table = table(rf_pred_class, valid_data$resigned_with_draft_team) 
+
+levels(as.factor(rf_pred_class))
+levels(as.factor(valid_data$resigned_with_draft_team))
+
+confusionMatrix(resign_table, positive = "1")
+```
+## Tuning the RF Model for Error Rate
+```{r}
+oob_error_model_1 = rf_draft_mod$err.rate[,1] 
+
+plot_dat_model_1 = cbind.data.frame(rep(1:length(oob_error_model_1)), oob_error_model_1) 
+names(plot_dat_model_1) = c("trees", "oob_error_model_1")
+
+graph_plot_1 = ggplot(plot_dat_model_1, aes(x = trees, y = oob_error_model_1)) + 
+  geom_point(alpha = 0.5, color = "blue") + 
+  geom_smooth() + 
+  theme_bw() + 
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        panel.border = element_blank(), 
+        panel.background = element_blank()) + 
+  labs(x = "Number of Trees", title = "Error Rate v Number of Trees",
+       y = "Error Rate")
+
+graph_plot_1
+
+##Optimal number of trees is 300
+```
+## Try increasing node size
+```{r}
+nodesizerf = c(1, 10, 25, 50, 100, 200, 500, 1000)
+
+param = expand.grid(nodesizerf)
+
+names(param) = ("nodesizerf") 
+
+res_vec = rep(NA, nrow(param))
+
+for(i in 1:nrow(param)){ 
+  set.seed(719) 
+  RF_model_2 = randomForest(resigned_with_draft_team ~., 
+                      data=train_data_clean,
+                      mtry = 40, 
+                      importance = FALSE,   
+                      ntree = 300, 
+                      nodesize = param$nodesizerf[i]) 
+  res_vec[i] = 1 - RF_model_2$err.rate[nrow(RF_model_2$err.rate),1] 
+}
+
+summary(res_vec)
+
+res_db = cbind.data.frame(param, res_vec) 
+
+names(res_db)[2] = "oob_accuracy"
+
+res_db
+
+##Best Node size for our Model is 50
+```
+## Creating a 3rd RF with those optimized params
+```{r}
+rf_draft_mod3 = randomForest(resigned_with_draft_team ~.,
+                     	data = train_data_clean,
+                     	ntree = 300,
+                     	nodesize = 50,
+                     	mtry = 40) 
+
+rf_pred = predict(rf_draft_mod3, valid_data, type = "prob")
+
+
+rf_pred_class = rep("0", nrow(rf_pred))
+
+rf_pred_class[rf_pred[,2] >= 0.5] = "1"
+
+resign_table = table(rf_pred_class, valid_data$resigned_with_draft_team) 
+
+levels(as.factor(rf_pred_class))
+levels(as.factor(valid_data$resigned_with_draft_team))
+
+confusionMatrix(resign_table, positive = "1")
+```
+
+## Using Cross Validation on Samples
+```{r}
+set.seed(719)
+
+
+cv_index = sample(1:5, nrow(train_data_clean), replace = TRUE )
+
+cv_acc = rep(NA, 5)
+
+for(i in 1:5){ 
+  cv_train = train_data_clean[cv_index != i, c(1:41)] 
+  cv_valid = train_data_clean[cv_index == i, c(1:41)]
+
+  RF_model_4 = randomForest(resigned_with_draft_team ~ . - resigned_with_draft_team, 
+                data = cv_train, 
+                mtry = 40, 
+                ntree = 300, 
+                nodesize = 50) 
+  
+  pred_model_4 = predict(RF_model_4, cv_valid)
+  
+ CF_pred_model_4 = confusionMatrix(pred_model_4, cv_valid$resigned_with_draft_team)
+}
+
+CF_pred_model_4
+
+#Our best model so far is this cross validation model, predicting at almost 70%
+```
+
+
+
